@@ -57,7 +57,7 @@ LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 150))
 async def serve_frontend():
     """Serve the main HTML interface"""
     try:
-        with open("index.html", "r", encoding="utf-8") as f:
+        with open("index2.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
         return HTMLResponse(content="<h1>Frontend not found</h1><p>Please ensure index.html is in the same directory as app.py</p>", status_code=404)
@@ -501,25 +501,31 @@ from fastapi import Request
 async def analyze_data(request: Request):
     try:
         form = await request.form()
+        questions_file = None
+        data_file = None
 
-        # Get uploaded question file
-        questions_file = form.get("questions_file")
+        for key, val in form.items():
+            if hasattr(val, "filename") and val.filename:  # it's a file
+                fname = val.filename.lower()
+                if fname.endswith(".txt") and questions_file is None:
+                    questions_file = val
+                else:
+                    data_file = val
+
         if not questions_file:
-            raise HTTPException(400, "Missing questions_file")
+            raise HTTPException(400, "Missing questions file (.txt)")
 
-        raw_questions = questions_file.file.read().decode("utf-8")
+        raw_questions = (await questions_file.read()).decode("utf-8")
         keys_list, type_map = parse_keys_and_types(raw_questions)
 
         pickle_path = None
         df_preview = ""
         dataset_uploaded = False
 
-        # Get optional data file
-        data_file = form.get("data_file")
         if data_file:
             dataset_uploaded = True
             filename = data_file.filename.lower()
-            content = data_file.file.read()
+            content = await data_file.read()
             from io import BytesIO
 
             if filename.endswith(".csv"):
@@ -533,11 +539,16 @@ async def analyze_data(request: Request):
                     df = pd.read_json(BytesIO(content))
                 except ValueError:
                     df = pd.DataFrame(json.loads(content.decode("utf-8")))
-            elif filename.endswith(".txt"):
+            elif filename.endswith(".png") or filename.endswith(".jpg") or filename.endswith(".jpeg"):
                 try:
-                    df = pd.read_csv(BytesIO(content), sep=None, engine="python")
-                except Exception:
-                    df = pd.DataFrame({"text": content.decode("utf-8").splitlines()})
+                    if PIL_AVAILABLE:
+                        image = Image.open(BytesIO(content))
+                        image = image.convert("RGB")  # ensure RGB format
+                        df = pd.DataFrame({"image": [image]})
+                    else:
+                        raise HTTPException(400, "PIL not available for image processing")
+                except Exception as e:
+                    raise HTTPException(400, f"Image processing failed: {str(e)}")  
             else:
                 raise HTTPException(400, f"Unsupported data file type: {filename}")
 
@@ -703,5 +714,5 @@ async def analyze_get_info():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("PORT", 8000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
