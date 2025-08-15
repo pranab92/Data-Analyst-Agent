@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import io
 import os
+import difflib
 import re
 import json
 import base64
@@ -57,7 +58,7 @@ LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", 150))
 async def serve_frontend():
     """Serve the main HTML interface"""
     try:
-        with open("index2.html", "r", encoding="utf-8") as f:
+        with open("index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
         return HTMLResponse(content="<h1>Frontend not found</h1><p>Please ensure index.html is in the same directory as app.py</p>", status_code=404)
@@ -459,7 +460,7 @@ def run_agent_safely(llm_input: str) -> Dict:
 
         code = parsed["code"]
         questions: List[str] = parsed["questions"]
-
+        print("-----Test-----",questions)
         # Detect scrape calls; find all URLs used in scrape_url_to_dataframe("URL")
         urls = re.findall(r"scrape_url_to_dataframe\(\s*['\"](.*?)['\"]\s*\)", code)
         pickle_path = None
@@ -482,13 +483,16 @@ def run_agent_safely(llm_input: str) -> Dict:
         if exec_result.get("status") != "success":
             return {"error": f"Execution failed: {exec_result.get('message', exec_result)}", "raw": exec_result.get("raw")}
 
-        # exec_result['result'] should be results dict
-        results_dict = exec_result.get("result", {})
-        # Map to original questions (they asked to use exact question strings)
-        output = {}
-        for q in questions:
-            output[q] = results_dict.get(q, "Answer not found")
-        return output
+        # # exec_result['result'] should be results dict
+        # results_dict = exec_result.get("result", {})
+        # # Map to original questions (they asked to use exact question strings)
+        # output = {}
+        # for q in questions:
+        #     print("-----Test-----2",q)
+        #     print("-----Test-----3",results_dict.get(q))
+        #     output[q] = results_dict.get(q, "Answer not found")
+            
+        return map_results_to_questions(questions, exec_result.get("result", {}))
 
     except Exception as e:
         logger.exception("run_agent_safely failed")
@@ -507,6 +511,7 @@ async def analyze_data(request: Request):
         for key, val in form.items():
             if hasattr(val, "filename") and val.filename:  # it's a file
                 fname = val.filename.lower()
+                print("fname",fname)
                 if fname.endswith(".txt") and questions_file is None:
                     questions_file = val
                 else:
@@ -523,7 +528,9 @@ async def analyze_data(request: Request):
         dataset_uploaded = False
 
         if data_file:
+            
             dataset_uploaded = True
+            print("Dataset (csv) uploaded--!", dataset_uploaded)
             filename = data_file.filename.lower()
             content = await data_file.read()
             from io import BytesIO
@@ -573,8 +580,10 @@ async def analyze_data(request: Request):
                 "3) Use only the uploaded dataset for answering questions.\n"
                 "4) Produce a final JSON object with keys:\n"
                 '   - "questions": [ ... original question strings ... ]\n'
-                '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
-                "5) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
+                '   - "code": "..."  (Python code that fills `results` with EXACTLY the original question strings as keys)\n'
+                "5) In your Python code, always use results[questions[i]] instead of retyping the question text.\n"
+                "6) Do not reword, shorten, or alter question strings in any way.\n"
+                "7) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
             )
         else:
             llm_rules = (
@@ -582,9 +591,12 @@ async def analyze_data(request: Request):
                 "1) If you need web data, CALL scrape_url_to_dataframe(url).\n"
                 "2) Produce a final JSON object with keys:\n"
                 '   - "questions": [ ... original question strings ... ]\n'
-                '   - "code": "..."  (Python code that fills `results` with exact question strings as keys)\n'
-                "3) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
+                '   - "code": "..."  (Python code that fills `results` with EXACTLY the original question strings as keys)\n'
+                "3) In your Python code, always use results[questions[i]] instead of retyping the question text.\n"
+                "4) Do not reword, shorten, or alter question strings in any way.\n"
+                "5) For plots: use plot_to_base64() helper to return base64 image data under 100kB.\n"
             )
+
 
         llm_input = (
             f"{llm_rules}\nQuestions:\n{raw_questions}\n"
@@ -628,7 +640,20 @@ async def analyze_data(request: Request):
     except Exception as e:
         logger.exception("analyze_data failed")
         raise HTTPException(500, detail=str(e))
-
+    
+def map_results_to_questions(questions, results_dict):
+    output = {}
+    for q in questions:
+        if q in results_dict:
+            output[q] = results_dict[q]
+        else:
+            # Fallback: fuzzy match to closest key
+            closest = difflib.get_close_matches(q, results_dict.keys(), n=1, cutoff=0.8)
+            if closest:
+                output[q] = results_dict[closest[0]]
+            else:
+                output[q] = "Answer not found"
+    return output
 
 def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
     """
@@ -642,6 +667,7 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
         raw_out = ""
         for attempt in range(1, max_retries + 1):
             response = agent_executor.invoke({"input": llm_input}, {"timeout": LLM_TIMEOUT_SECONDS})
+            print(f"response: {response}")
             raw_out = response.get("output") or response.get("final_output") or response.get("text") or ""
             if raw_out:
                 break
@@ -654,7 +680,8 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
 
         if "code" not in parsed or "questions" not in parsed:
             return {"error": f"Invalid agent response: {parsed}"}
-
+        
+        
         code = parsed["code"]
         questions = parsed["questions"]
 
@@ -674,9 +701,8 @@ def run_agent_safely_unified(llm_input: str, pickle_path: str = None) -> Dict:
         exec_result = write_and_run_temp_python(code, injected_pickle=pickle_path, timeout=LLM_TIMEOUT_SECONDS)
         if exec_result.get("status") != "success":
             return {"error": f"Execution failed: {exec_result.get('message')}", "raw": exec_result.get("raw")}
-
-        results_dict = exec_result.get("result", {})
-        return {q: results_dict.get(q, "Answer not found") for q in questions}
+        
+        return map_results_to_questions(questions, exec_result.get("result", {}))
 
     except Exception as e:
         logger.exception("run_agent_safely_unified failed")
@@ -703,7 +729,7 @@ async def favicon():
         return FileResponse(path, media_type="image/x-icon")
     return Response(content=_FAVICON_FALLBACK_PNG, media_type="image/png")
 
-@app.get("/api", include_in_schema=False)
+@app.get("/health/info", include_in_schema=False)
 async def analyze_get_info():
     """Health/info endpoint. Use POST /api for actual analysis."""
     return JSONResponse({
